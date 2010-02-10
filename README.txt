@@ -1,0 +1,1 @@
+hipe-didcap - dynamic interval delta (screen) capture

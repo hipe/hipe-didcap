@@ -1,0 +1,6 @@
+#!/usr/bin/env ruby
+# -*- mode: ruby -*-
+
+gem 'hipe-didcap', '= 0.0.0pre'
+require 'hipe-didcap'
+puts Hipe::Didcap.new.cli_run(ARGV)
