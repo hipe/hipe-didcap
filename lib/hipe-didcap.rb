@@ -1,5 +1,5 @@
 require 'hipe-core/interfacey'
-require 'open3'
+require 'open4'
 require 'ruby-debug' # @todo
 require 'json'
 
@@ -15,7 +15,7 @@ module Hipe
       default_request 'help'
 
       responds_to('start') do
-        describe 'start recording daemon with the specified settings'
+        describe 'start the recording daemon'
         opts.on('--interval SEC', Integer,
           'min number of seconds between each frame',
           'warning -- this might change to MSEC one day [default: 5]',
@@ -29,7 +29,7 @@ module Hipe
       end
 
       responds_to('stop') do
-        describe 'stop recording'
+        describe 'stop the recording daemon'
         optional('out-folder',
           'which recording to stop (default: "./recorded-images")',
           :default=>'recorded-images'
@@ -37,39 +37,21 @@ module Hipe
         opts.on('-h','--help','this screen',&help)
       end
 
-      responds_to('status') do
-        describe 'show status of any running daemon'
+      responds_to('build') do
+        describe 'build playback movie from recorded images'
+        optional('recording-folder',
+          'where the recordings live',
+          '  (default: "./recorded-images")',
+          :default=>'recorded-images'
+        )
+        optional('out-file',
+          'the name of the movie to build file',
+          '  (default: "<folder>/movie.mpg")'
+        )
+        opts.on('-h','--help','this screen',&help)
       end
 
       responds_to 'help', 'this page', :aliases=>['-h','--help','-?']
-    end
-
-    def process_is_maybe_running
-      File.exist? pid_filepath
-    end
-
-    def pid_in_file
-      File.read(pid_filepath).to_i
-    end
-
-    def maybe_kill_process
-      pid = pid_in_file
-      puts "attempting to kill PID ##{pid}"
-      begin
-        rs = Process.kill('KILL', pid)
-        puts(" result of kill: "<<rs.inspect)
-      rescue Errno::ESRCH => e
-        puts "process wasn't running"
-      end
-      FileUtils.rm pid_filepath
-      'done.'
-    end
-
-    def write_pid_file
-      File.open(pid_filepath,'w') do |fh|
-        fh.write Process.pid
-      end
-      puts "wrote #{pid_filepath} with pid ##{Process.pid}"
     end
 
     def stop out_folder, opts
@@ -89,7 +71,7 @@ module Hipe
              "Try 'stop' first."
         return ''
       end
-      @proxy = FfmpegProxy.new out_folder, opts
+      @proxy = FfmpegProxy.new self, out_folder, opts
       # this is process #A. it will exit immediately at end of this method
       fork do
         # this is process #B
@@ -120,7 +102,86 @@ module Hipe
       ''
     end
 
-    # implementers:
+    ##
+    # @todo this doesn't read the manifest it just
+    # uses the images. mebbe ok unless we somehow end up with a 'corrupt'
+    # recording folders
+    ##
+    def build folder, out_path, opts
+      init_folder folder, opts
+      if out_path.nil?
+        out_path = File.join(folder,'movie.mpg')
+      end
+      if File.exist? out_path
+        moved_to = move_to_backup out_path
+        puts "#{me}: existing movie found in target location so.."
+        puts "#{me}: moving \"#{out_path}\" to \"#{moved_to}\""
+      end
+      images_glob = File.join(folder, '%d.png')
+      command = "ffmpeg -i #{images_glob} #{out_path}"
+      puts "#{me} executing: \n  #{command}\n..."
+      pid, stdin, stdout, stderr = Open4::popen4 command
+      ignored, status = Process::waitpid2 pid
+      err = stderr.read
+      output = stdout.read
+      # close all pipes to avoid leaks - thx unf
+      [stdin,stdout,stderr].each{|pipe| pipe.close}
+      if status.exitstatus != 0
+        raise Fail.new("#{me} failed build to build with\n"<<
+          "   #{command}\nmessage from ffmpeg: #{err}")
+      end
+      # raise Fail.new(stderr) unless ''==stderr
+      puts "#{me}: ffmpeg response:\n"
+      puts err
+      if ''!=output
+        raise Fail.new("not expecting any output here: #{output}")
+      end
+      puts "\n#{me} probably done building \"#{out_path}\"."
+      ''
+    end
+
+
+    ############ implementation ##############
+
+    def me
+      'didcap'
+    end
+
+    def move_to_backup path
+      before_extension, extension = /^(.+)\.([^\.]+)$/.match(path).captures
+      timestamp = Time.now.strftime('%Y-%m-%d--%H-%M-%S')
+      new_name = "#{before_extension}.bak.#{timestamp}.#{extension}"
+      FileUtils.mv path, new_name
+      new_name
+    end
+
+    def process_is_maybe_running
+      File.exist? pid_filepath
+    end
+
+    def pid_in_file
+      File.read(pid_filepath).to_i
+    end
+
+    def maybe_kill_process
+      pid = pid_in_file
+      puts "attempting to kill PID ##{pid}"
+      begin
+        rs = Process.kill('KILL', pid)
+        puts(" result of kill: "<<rs.inspect)
+      rescue Errno::ESRCH => e
+        puts "process wasn't running"
+      end
+      FileUtils.rm pid_filepath
+      'done.'
+    end
+
+    def write_pid_file
+      File.open(pid_filepath,'w') do |fh|
+        fh.write Process.pid
+      end
+      puts "wrote #{pid_filepath} with pid ##{Process.pid}"
+    end
 
     def validate_opts opts
       if opts.interval < 1 || opts.interval > 100
@@ -144,7 +205,8 @@ module Hipe
 
     class FfmpegProxy
 
-      def initialize folder, opts
+      def initialize controller, folder, opts
+        @controller = controller
         @folder = folder
         @opts = opts
         manifest_path = File.join(@folder,ManifestName)
@@ -161,13 +223,18 @@ module Hipe
       end
 
       def capture
-        stdout = stderr = nil
-        command = self.command
-        Open3.popen3(command) do |sin, sout, serr|
-          stdout = sout.read
-          stderr = serr.read
+        command = self.capture_command
+        pid, stdin, stdout, stderr = Open4::popen4 command
+        ignored, status = Process::waitpid2 pid
+        err = stderr.read
+        output = stdout.read
+        # close all pipes to avoid leaks
+        [stdin,stdout,stderr].each{|pipe| pipe.close}
+        if status.exitstatus != 0
+          raise Fail.new("#{@controller.me} failed to capture with "<<
+            " command:\n  #{command}\nresponse from ffmpeg:\n#{err}"
+          )
         end
-        raise Fail.new(stderr) unless ''==stderr
         add_record_to_manifest
         @next_index += 1
         nil
@@ -192,11 +259,11 @@ module Hipe
         inner = @manifest.read
         return 0 if "" == inner
         json = JSON.parse("[#{inner}]")
-        last_index = json.last.index
+        last_index = json.last['index']
         last_index + 1
       end
 
-      def command
+      def capture_command
         [
           'screencapture',
           '-C', # Capture the cursor as well as the screen.  Only allowed in
