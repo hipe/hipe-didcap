@@ -1,4 +1,7 @@
 require 'hipe-core/interfacey'
+require 'open3'
+require 'ruby-debug' # @todo
+require 'json'
 
 module Hipe
   class Didcap
@@ -56,7 +59,7 @@ module Hipe
         rs = Process.kill('KILL', pid)
         puts(" result of kill: "<<rs.inspect)
       rescue Errno::ESRCH => e
-        puts "no such process"
+        puts "process wasn't running"
       end
       FileUtils.rm pid_filepath
       'done.'
@@ -72,7 +75,7 @@ module Hipe
     def stop out_folder, opts
       init_folder out_folder, opts
       if (!process_is_maybe_running)
-        return "no known process is running."
+        return "no known process is running for \"#{@path}\"."
       else
         maybe_kill_process
       end
@@ -82,10 +85,11 @@ module Hipe
       init_folder out_folder, opts
       validate_opts opts
       if process_is_maybe_running
-        puts "Process may already be running (##{pid_in_file}). "<<
+        puts "Process may already be running (pid ##{pid_in_file}). "<<
              "Try 'stop' first."
         return ''
       end
+      @proxy = FfmpegProxy.new out_folder, opts
       # this is process #A. it will exit immediately at end of this method
       fork do
         # this is process #B
@@ -101,7 +105,7 @@ module Hipe
           end
           loop do
             begin
-              puts("writing to logfile at "<<timestamp);
+              @proxy.capture
               sleep(opts.interval)
               rescue Interrupt
                 puts "got interrupt. exiting."
@@ -117,9 +121,6 @@ module Hipe
     end
 
     # implementers:
-    def timestamp
-      Time.now.strftime('%Y-%m-%d--%H-%M-%S')
-    end
 
     def validate_opts opts
       if opts.interval < 1 || opts.interval > 100
@@ -128,18 +129,98 @@ module Hipe
     end
 
     def pid_filepath
-      File.join @out_path, 'pid'
+      File.join @path, 'pid'
     end
 
     def init_folder path, opts
-      @out_path = path
+      @path = path
       if ! File.directory? path
         FileUtils.mkdir path
         puts "wrote #{path}"
       end
-      @log_fh = File.open(
-        File.join(@out_path,'_manifest.txt'),'w'
-      )
     end
+
+    ManifestName = '000-manifest.txt'
+
+    class FfmpegProxy
+
+      def initialize folder, opts
+        @folder = folder
+        @opts = opts
+        manifest_path = File.join(@folder,ManifestName)
+        if File.exist? manifest_path
+          puts "continuing existing manifest: #{manifest_path}"
+          @manifest = File.open(manifest_path,'r+')
+          @next_index = next_index
+        else
+          puts "starting new manifest: #{manifest_path}"
+          @manifset = File.open(manifest_path, 'a')
+          @next_index = 0
+        end
+        raise Fail.new("where is manifest?") unless @manifest
+      end
+
+      def capture
+        stdout = stderr = nil
+        command = self.command
+        Open3.popen3(command) do |sin, sout, serr|
+          stdout = sout.read
+          stderr = serr.read
+        end
+        raise Fail.new(stderr) unless ''==stderr
+        add_record_to_manifest
+        @next_index += 1
+        nil
+      end
+
+      # private
+
+      def add_record_to_manifest
+        record = (0==@next_index ? '' : ",\n") <<
+         "{\"index\":#{@next_index}, \"timestamp\":\"#{timestamp}\"}"
+        $stdout.write record
+        @manifest.write record
+        @manifest.flush # @todo consider changing this if it gets fast
+        nil
+      end
+
+      def timestamp
+        Time.now.strftime('%Y-%m-%d %H:%M:%S')
+      end
+
+      def next_index
+        inner = @manifest.read
+        return 0 if "" == inner
+        json = JSON.parse("[#{inner}]")
+        last_index = json.last.index
+        last_index + 1
+      end
+
+      def command
+        [
+          'screencapture',
+          '-C', # Capture the cursor as well as the screen.  Only allowed in
+            # non-interactive modes.
+          # '-x', # Do not play sounds.
+          '-m', # Only capture the main monitor, undefined if -i is set.
+          '-t png', # <format> Image format to create, default is png
+            # (other options include pdf, jpg, tiff and other formats).
+            # -T  <seconds> Take the picture after a delay of <seconds>,
+            # default is 5.
+          next_filename
+        ] * ' '
+      end
+
+      def extension
+        'png'
+      end
+
+      def next_filename
+        File.join(@folder,"#{@next_index}.#{extension}")
+      end
+
+    end
+
+    class Fail < RuntimeError; end
   end
 end

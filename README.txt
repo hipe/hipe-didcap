@@ -1,8 +1,20 @@
-hipe-didcap - dynamic interval delta (screen) capture
+hipe-didcap - dynamic interval delta (screen) capture.
 
 this is a wrapper around ffmpeg that does some stuff.
 
-INSTALL ffmpeg:
+The idea is to make a timelapse screencast.  You take a snapshot of your
+screen every 5 seconds or so, and keep that image only if it is different
+than the previous image.  When you are done 'recording', you spice all the
+images together.  The result is supposed to be a change-sensitive time lapse.
+We'll see.
+
+------
+
+Installation guide:
+
+@todo depends on hipe-core gem
+
+Install ffmpeg:
 
 installing ffmpeg on mac snowleopard with intel chip
 from
