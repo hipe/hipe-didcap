@@ -4,6 +4,24 @@ require 'ruby-debug' # @todo
 require 'json'
 
 module Hipe
+
+  module Timestampey
+    # if a thing defines timestamp() which returns a string that can be
+    # parsed by DateTime.parse, then give it datetime() and time() (gm)
+
+    def datetime
+      DateTime.parse timestamp
+    end
+
+    def time
+      d = datetime
+      # Convert a fraction of a day to a number of microseconds
+      usec = (d.sec_fraction * 60 * 60 * 24 * (10**6)).to_i
+      Time.gm(d.year,d.month,d.day,d.hour,d.min,d.sec, usec)
+    end
+
+  end
+
   class Didcap
     DefaultProjectName = 'default.didcap'
 
@@ -18,7 +36,7 @@ module Hipe
 
       responds_to('start') do
         describe 'start the recording daemon'
-        opts.on('--interval SEC', Integer,
+        opts.on('--interval SEC', Float,
           'min number of seconds between each frame',
           'warning -- this might change to MSEC one day [default: 5]',
           :default => '5'
@@ -55,8 +73,20 @@ module Hipe
         opts.on('-h','--help','this screen',&help)
       end
 
+      responds_to('info') do
+        describe 'summary information for the project'
+        optional('proj-folder',
+          'the folder with your images, etc.',
+          "  (default: \"#{DefaultProjectName}\")",
+          :default=>DefaultProjectName
+        )
+        opts.on('-h','--help','this screen',&help)
+      end
+
       responds_to 'help', 'this page', :aliases=>['-h','--help','-?']
     end
+
+    #### request responders:
 
     def stop out_folder, opts
       @project = get_project out_folder, opts
@@ -90,6 +120,16 @@ module Hipe
         end
       end
       ''
+    end
+
+    def info proj_folder, opts
+      _info(proj_folder, opts).to_json
+    end
+
+    # for testing yuch
+    def _info a,b
+      @project = get_project a,b
+      @project.info
     end
 
     ##
@@ -134,7 +174,7 @@ module Hipe
     end
 
 
-    ############ implementation ##############
+    ##### implementation
 
     def me
       'didcap'
@@ -145,7 +185,7 @@ module Hipe
     end
 
     def maybe_kill_process pid
-      puts "attempting to kill PID ##{pid}"
+      puts "\nattempting to kill PID ##{pid}"
       begin
         rs = Process.kill('KILL', pid)
         puts(" result of kill: "<<rs.inspect)
@@ -157,7 +197,7 @@ module Hipe
     end
 
     def validate_opts opts
-      if opts.interval < 1 || opts.interval > 100
+      if opts.interval < 0.25 || opts.interval > 100
         raise Fail.new("interval out of range: #{opts.interval}")
       end
     end
@@ -220,6 +260,18 @@ module Hipe
         new_name
       end
 
+      def info
+        info = {}
+        images = manifest.images
+        info[:number_of_images] = images.length
+        info[:duration_in_seconds] = nil
+        if images.length > 0
+          first = images.first
+          last = images.last
+          info[:duration_in_seconds] = last.time - first.time
+        end
+        info
+      end
 
       # private
 
@@ -249,7 +301,7 @@ module Hipe
 
         def initialize path
           if (File.exist?(path))
-            puts "adding to existing images in #{path}"
+            puts "using manifest #{path}"
           else
             puts "starting new manifest at #{path}"
             FileUtils.touch path
@@ -258,6 +310,7 @@ module Hipe
           inner = @fh.read
           json = "[#{inner}]"
           @images = JSON.parse json
+          @images.extend Images
         end
 
         def next_index
@@ -278,9 +331,37 @@ module Hipe
           @fh.write record
           @fh.flush # @todo consider changing this if it gets fast
         end
+
+        module ImageInstanceMethods
+          include Hipe::Timestampey
+          def timestamp; self['timestamp'] end
+        end
+
+        module Images
+          module InstanceMethods
+            def [](idx);  my_fetch(idx) end
+            def first;    my_fetch(0); end
+            def last;     my_fetch(length-1); end
+            def each &b
+              each_index do |idx|
+                b.call(my_fetch(idx))
+              end
+            end
+          end
+          def self.extended obj
+            class << obj
+              alias_method :orig_fetch, :[]
+            end
+            obj.extend InstanceMethods
+          end
+          def my_fetch idx
+            img = orig_fetch idx
+            img.extend ImageInstanceMethods
+            img
+          end
+        end
       end
     end
-
 
     ManifestName = '000-manifest.txt'
 
