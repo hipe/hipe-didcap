@@ -169,8 +169,7 @@ module Hipe
       if ''!=output
         raise Fail.new("not expecting any output here: #{output}")
       end
-      puts "\n#{me} probably done building \"#{out_path}\"."
-      ''
+      "\n#{me} probably done building \"#{out_path}\"."
     end
 
 

@@ -60,6 +60,13 @@ BareTest.suite do
       assert "number of images should be about right" do
         within_delta @info[:duration_in_seconds], 2, 1.1
       end
+
+      assert "movie build" do
+        s = @app.cli_run('build', @test_proj)
+        equal(s,"\ndidcap probably done building "<<
+           "\"./test/writable-temp/tmp-proj/movies/movie.mpg\"."
+        )
+      end
     end
   end
 end

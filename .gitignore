@@ -1,2 +1,3 @@
 *.didcap
 tmp.*
+test/writable-temp/*
