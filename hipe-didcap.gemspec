@@ -8,7 +8,7 @@ Gem::Specification.new do |s|
   s.authors = ["Chip Malice"]
   s.date = %q{2010-02-10}
   s.description = %q{dynamic interval delta (screen) capture}
-  s.summary = %q{makes *.png image screen captures at intervals}  
+  s.summary = %q{makes *.png image screen captures at intervals}
   s.email = %q{chip.malice@gmail.com}
   s.executables = ["hipe-didcap"]
   s.files = [
@@ -20,6 +20,10 @@ Gem::Specification.new do |s|
   s.homepage = %q{http://github.com/hipe/hipe-didcap}
   s.require_paths = ["lib"]
   s.rubygems_version = %q{1.3.5}
+
+  s.add_development_dependency 'baretest'
+  s.add_development_dependency 'fakefs'
+
 
   if s.respond_to? :specification_version then
     current_version = Gem::Specification::CURRENT_SPECIFICATION_VERSION

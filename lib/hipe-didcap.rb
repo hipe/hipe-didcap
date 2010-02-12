@@ -5,6 +5,8 @@ require 'json'
 
 module Hipe
   class Didcap
+    DefaultProjectName = 'default.didcap'
+
     include Hipe::Interfacey::Service
     interface.might do
       speaks :cli
@@ -22,8 +24,9 @@ module Hipe
           :default => '5'
         )
         optional('out-folder',
-          'where to write the recorded images (default: "./recorded-images")',
-          :default=>'recorded-images'
+          'where to write the recorded images '<<
+            "(default: \"./#{DefaultProjectName})\"",
+          :default=>DefaultProjectName
         )
         opts.on('-h','--help','this screen',&help)
       end
@@ -31,8 +34,9 @@ module Hipe
       responds_to('stop') do
         describe 'stop the recording daemon'
         optional('out-folder',
-          'which recording to stop (default: "./recorded-images")',
-          :default=>'recorded-images'
+          'which recording to stop (default: "./'<<
+          "#{DefaultProjectName})\"",
+          :default=>DefaultProjectName
         )
         opts.on('-h','--help','this screen',&help)
       end
@@ -41,8 +45,8 @@ module Hipe
         describe 'build playback movie from recorded images'
         optional('recording-folder',
           'where the recordings live',
-          '  (default: "./recorded-images")',
-          :default=>'recorded-images'
+          "  (default: \"#{DefaultProjectName}\")",
+          :default=>DefaultProjectName
         )
         optional('out-file',
           'the name of the movie to build file',
@@ -55,50 +59,36 @@ module Hipe
     end
 
     def stop out_folder, opts
-      init_folder out_folder, opts
-      if (!process_is_maybe_running)
-        return "no known process is running for \"#{@path}\"."
+      @project = get_project out_folder, opts
+      if @project.pid?
+        maybe_kill_process @project.pid
       else
-        maybe_kill_process
+        return "no known process is running for \"#{@project.name}\"."
       end
     end
 
+    # be922 has failed attempts at trapping interrupt signal
     def start out_folder, opts
-      init_folder out_folder, opts
       validate_opts opts
-      if process_is_maybe_running
-        puts "Process may already be running (pid ##{pid_in_file}). "<<
-             "Try 'stop' first."
+      @project = get_project out_folder, opts
+      if @project.pid?
+        puts "Process may already be running (pid ##{@project.pid}). "<<
+             "Try '#{me} stop' first."
         return ''
       end
-      @proxy = FfmpegProxy.new self, out_folder, opts
-      # this is process #A. it will exit immediately at end of this method
+      @proxy = FfmpegProxy.new @project
       fork do
-        # this is process #B
         Process.setsid
-        # after setsid this is still process #B
         fork do
-          write_pid_file
-          # this is process #C
-          # tried trapping 'HUP', 'INT' 'KILL' 'QUIT' 'EXIT' to no avail
-          trap 'KILL' do
-            puts "got kill signal."
-            exit 1
-          end
+          @project.write_pid_file
           loop do
             begin
               @proxy.capture
-              sleep(opts.interval)
-              rescue Interrupt
-                puts "got interrupt. exiting."
-              exit
+              sleep opts.interval
             end
           end
-          # you never get here!
         end
-        # this is process #B leaving
       end
-      # this is process #A leaving
       ''
     end
 
@@ -108,16 +98,19 @@ module Hipe
     # recording folders
     ##
     def build folder, out_path, opts
-      init_folder folder, opts
+      @project = get_project folder, opts
       if out_path.nil?
-        out_path = File.join(folder,'movie.mpg')
+        out_path = File.join(folder,'movies','movie.mpg')
+      end
+      unless File.directory?(File.dirname(out_path))
+        FileUtils.mkdir_p(File.dirname(out_path))
       end
       if File.exist? out_path
-        moved_to = move_to_backup out_path
+        moved_to = Project.move_to_backup out_path
         puts "#{me}: existing movie found in target location so.."
         puts "#{me}: moving \"#{out_path}\" to \"#{moved_to}\""
       end
-      images_glob = File.join(folder, '%d.png')
+      images_glob = File.join(folder, 'images','%d.png')
       command = "ffmpeg -i #{images_glob} #{out_path}"
       puts "#{me} executing: \n  #{command}\n..."
       pid, stdin, stdout, stderr = Open4::popen4 command
@@ -147,24 +140,11 @@ module Hipe
       'didcap'
     end
 
-    def move_to_backup path
-      before_extension, extension = /^(.+)\.([^\.]+)$/.match(path).captures
-      timestamp = Time.now.strftime('%Y-%m-%d--%H-%M-%S')
-      new_name = "#{before_extension}.bak.#{timestamp}.#{extension}"
-      FileUtils.mv path, new_name
-      new_name
+    def get_project folder, opts
+      Project.new self, folder, opts
     end
 
-    def process_is_maybe_running
-      File.exist? pid_filepath
-    end
-
-    def pid_in_file
-      File.read(pid_filepath).to_i
-    end
-
-    def maybe_kill_process
-      pid = pid_in_file
+    def maybe_kill_process pid
       puts "attempting to kill PID ##{pid}"
       begin
         rs = Process.kill('KILL', pid)
@@ -172,15 +152,8 @@ module Hipe
       rescue Errno::ESRCH => e
         puts "process wasn't running"
       end
-      FileUtils.rm pid_filepath
+      @project.clear_pid
       'done.'
-    end
-
-    def write_pid_file
-      File.open(pid_filepath,'w') do |fh|
-        fh.write Process.pid
-      end
-      puts "wrote #{pid_filepath} with pid ##{Process.pid}"
     end
 
     def validate_opts opts
@@ -189,37 +162,132 @@ module Hipe
       end
     end
 
-    def pid_filepath
-      File.join @path, 'pid'
-    end
 
-    def init_folder path, opts
-      @path = path
-      if ! File.directory? path
-        FileUtils.mkdir path
-        puts "wrote #{path}"
+    #
+    # this is just a wrapper around the project folder and
+    # whatever data files are in it, e.g pid file image files movie files
+    # this is the only place that has knowledge of paths.
+    #
+    class Project
+
+      # public
+      def initialize controller, path, opts
+        @controller = controller
+        @path = path
+        @opts = opts
+        if ! File.directory? @path
+          puts "#{me} initializing project directory:"
+          mkdirs = [
+            @path,
+            File.join(@path, 'movies'),
+            File.join(@path, 'images')
+          ]
+          mkdirs.each do |dir|
+            puts "  mkdir #{dir}"
+            FileUtils.mkdir dir
+          end
+        end
+      end
+
+      def pid;          pid? ? File.read(pid_filepath).to_i : nil end
+
+      def pid?;         File.exist?(pid_filepath) end
+
+      def clear_pid;    FileUtils.rm pid_filepath end
+
+      def name;         @path end
+
+
+      def has_images?
+        puts manifest.inspect
+        exit
+        manifest.images.length > 0
+      end
+
+      def next_filename
+        File.join(@path,'images',"#{manifest.next_index}.#{image_extension}")
+      end
+
+      def add_record_to_manifest
+        manifest.add_record
+      end
+
+      def self.move_to_backup path
+        before_extension, extension = /^(.+)\.([^\.]+)$/.match(path).captures
+        timestamp = Time.now.strftime('%Y-%m-%d--%H-%M-%S')
+        new_name = "#{before_extension}.bak.#{timestamp}.#{extension}"
+        FileUtils.mv path, new_name
+        new_name
+      end
+
+
+      # private
+
+      def image_extension; 'png' end
+
+      def manifest
+        @manifest ||= begin
+          Manifest.new File.join(@path, ManifestName)
+        end
+      end
+
+      def me; @controller.me end
+
+      def pid_filepath
+        File.join @path, 'pid.txt'
+      end
+
+      def write_pid_file
+        File.open(pid_filepath,'w') do |fh|
+          fh.write Process.pid
+        end
+        puts "#{me} wrote #{pid_filepath} with pid ##{Process.pid}"
+      end
+
+      class Manifest
+        attr_reader :images
+
+        def initialize path
+          if (File.exist?(path))
+            puts "adding to existing images in #{path}"
+          else
+            puts "starting new manifest at #{path}"
+            FileUtils.touch path
+          end
+          @fh = File.open(path,'r+')
+          inner = @fh.read
+          json = "[#{inner}]"
+          @images = JSON.parse json
+        end
+
+        def next_index
+          @images.length
+        end
+
+        def add_record
+          timestamp = Time.now.strftime('%Y-%m-%d %H:%M:%S')
+          _next_index = self.next_index
+          record = {
+            :index => next_index,
+            :timestamp => timestamp
+          }
+          @images.push record
+          new_line = record.to_json
+          record = (0==_next_index ? '' : ",\n") << new_line
+          $stdout.write record
+          @fh.write record
+          @fh.flush # @todo consider changing this if it gets fast
+        end
       end
     end
+
 
     ManifestName = '000-manifest.txt'
 
     class FfmpegProxy
 
-      def initialize controller, folder, opts
-        @controller = controller
-        @folder = folder
-        @opts = opts
-        manifest_path = File.join(@folder,ManifestName)
-        if File.exist? manifest_path
-          puts "continuing existing manifest: #{manifest_path}"
-          @manifest = File.open(manifest_path,'r+')
-          @next_index = next_index
-        else
-          puts "starting new manifest: #{manifest_path}"
-          @manifset = File.open(manifest_path, 'a')
-          @next_index = 0
-        end
-        raise Fail.new("where is manifest?") unless @manifest
+      def initialize project
+        @project = project
       end
 
       def capture
@@ -231,37 +299,15 @@ module Hipe
         # close all pipes to avoid leaks
         [stdin,stdout,stderr].each{|pipe| pipe.close}
         if status.exitstatus != 0
-          raise Fail.new("#{@controller.me} failed to capture with "<<
+          raise Fail.new("#{@project.me} failed to capture with "<<
             " command:\n  #{command}\nresponse from ffmpeg:\n#{err}"
           )
         end
-        add_record_to_manifest
-        @next_index += 1
+        @project.add_record_to_manifest
         nil
       end
 
       # private
-
-      def add_record_to_manifest
-        record = (0==@next_index ? '' : ",\n") <<
-         "{\"index\":#{@next_index}, \"timestamp\":\"#{timestamp}\"}"
-        $stdout.write record
-        @manifest.write record
-        @manifest.flush # @todo consider changing this if it gets fast
-        nil
-      end
-
-      def timestamp
-        Time.now.strftime('%Y-%m-%d %H:%M:%S')
-      end
-
-      def next_index
-        inner = @manifest.read
-        return 0 if "" == inner
-        json = JSON.parse("[#{inner}]")
-        last_index = json.last['index']
-        last_index + 1
-      end
 
       def capture_command
         [
@@ -274,18 +320,9 @@ module Hipe
             # (other options include pdf, jpg, tiff and other formats).
             # -T  <seconds> Take the picture after a delay of <seconds>,
             # default is 5.
-          next_filename
+          @project.next_filename
         ] * ' '
       end
-
-      def extension
-        'png'
-      end
-
-      def next_filename
-        File.join(@folder,"#{@next_index}.#{extension}")
-      end
-
     end
 
     class Fail < RuntimeError; end
