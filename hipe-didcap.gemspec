@@ -21,6 +21,10 @@ Gem::Specification.new do |s|
   s.require_paths = ["lib"]
   s.rubygems_version = %q{1.3.5}
 
+  s.add_dependency 'hipe-core', '>= 0.0.5'
+  s.add_dependency 'open4'
+  s.add_dependency 'json'
+
   s.add_development_dependency 'baretest'
   s.add_development_dependency 'fakefs'
 

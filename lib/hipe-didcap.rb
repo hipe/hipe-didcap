@@ -1,7 +1,8 @@
 require 'hipe-core/interfacey'
 require 'open4'
-require 'ruby-debug' # @todo
 require 'json'
+require 'ostruct'
+require 'ruby-debug'
 
 module Hipe
 
@@ -22,7 +23,48 @@ module Hipe
 
   end
 
+  module FileyCoyote
+    # helpy time for things that need to make files and enumerate directories
+
+    def move_to_backup path
+      before_extension, extension = /^(.+)\.([^\.]+)$/.match(path).captures
+      timestamp = Time.now.strftime('%Y-%m-%d--%H-%M-%S')
+      new_name = "#{before_extension}.bak.#{timestamp}.#{extension}"
+      FileUtils.mv path, new_name
+      new_name
+    end
+
+    PathPartsRe = /^(.+)\.([^\.]*)$/
+    # dirname, inner, extension
+    def path_parts path
+      d = File.dirname path
+      bn = File.basename path
+      re = PathPartsRe
+      md = nil
+      inner, ext = (md=re.match(bn)) ? md.captures : [bn,nil]
+      pts = re.match(bn).captures
+      OpenStruct.new(:dirname=>d, :inner=>inner, :extension=>ext)
+    end
+
+    def dir! path
+      dirpath = File.join(@path, path)
+      if ! File.directory? dirpath
+        FileUtils.mkdir_p dirpath
+      end
+      MyDir.new(dirpath)
+    end
+
+    class MyDir < Dir
+      def glob str='*'
+        path = File.join(self.path, str)
+        Dir.glob path
+      end
+    end
+
+  end
+
   class Didcap
+    include FileyCoyote
     DefaultProjectName = 'default.didcap'
 
     include Hipe::Interfacey::Service
@@ -80,6 +122,20 @@ module Hipe
           "  (default: \"#{DefaultProjectName}\")",
           :default=>DefaultProjectName
         )
+        opts.on('-h','--help','this screen',&help)
+      end
+
+      responds_to('qt2dv') do
+        describe 'quicktime to dv with some defaults'
+        optional('proj-folder',
+          'the folder with your movies, etc.',
+          "  (default: \"#{DefaultProjectName}\")",
+          :default=>DefaultProjectName
+        )
+        opts.on('-b','--bitrate bitrate','pass-thru option w/ default 11000k',
+          :default=>'11000k'
+        )
+        opts.on('-s','--skip-existing',"don't make it if it already exists")
         opts.on('-h','--help','this screen',&help)
       end
 
@@ -145,11 +201,7 @@ module Hipe
       unless File.directory?(File.dirname(out_path))
         FileUtils.mkdir_p(File.dirname(out_path))
       end
-      if File.exist? out_path
-        moved_to = Project.move_to_backup out_path
-        puts "#{me}: existing movie found in target location so.."
-        puts "#{me}: moving \"#{out_path}\" to \"#{moved_to}\""
-      end
+      move_to_backup_if_exists out_path
       images_glob = File.join(folder, 'images','%d.png')
       command = "ffmpeg -i #{images_glob} #{out_path}"
       puts "#{me} executing: \n  #{command}\n..."
@@ -170,6 +222,55 @@ module Hipe
         raise Fail.new("not expecting any output here: #{output}")
       end
       "\n#{me} probably done building \"#{out_path}\"."
+    end
+
+
+    def qt2dv proj, opts
+      @project = get_project proj, opts
+      dir = @project.dir! 'movies/qt'
+      @project.dir! 'movies/dv'
+      units = []
+      dir.glob('*.mov').each do |path|
+        pts = path_parts path
+        tgt = File.join(File.dirname(pts.dirname),'dv',"#{pts.inner}.dv")
+        cmd = <<-CMD.gsub(/  +|\n/,' ')
+          ffmpeg -b #{opts.bitrate} -i "#{path}" -target ntsc-dv "#{tgt}"
+        CMD
+        units.push OpenStruct.new(:src=>path, :tgt=>tgt, :cmd=>cmd)
+      end
+      t1 = Time.now
+      num_units = units.length
+      units.each_with_index do |unit, idx|
+        if File.exist? unit.tgt
+          if opts.skip_existing
+            puts "Skipping, target files exists: #{unit.tgt}"
+            next
+          else
+            move_to_backup_if_exists unit.tgt
+          end
+        end
+        t2 = Time.now
+        puts "\n#{me}: attemting to convert number #{idx+1} of #{num_units}"
+        puts "\n#{me}: trying: \n#{unit.cmd}\n...\n"
+        pid, stdin, stdout, stderr = Open4::popen4 unit.cmd
+        ignored, status = Process::waitpid2 pid
+        err = stderr.read
+        output = stdout.read
+        [stdin,stdout,stderr].each{|pipe| pipe.close}
+        if status.exitstatus != 0
+          raise Fail.new("#{@project.me} failed to convert with "<<
+            " command:\n  #{unit.cmd}\nresponse from ffmpeg:\n#{err}"
+          )
+        end
+        t3 = Time.now
+        took = t3 - t2;
+        total = t3 - t1;
+        puts "\n\n#{me} finished converting #{idx+1} of #{num_units}.  Took "<<
+          "#{took} seconds.  Have been doing this for #{total} seconds.\n\n"
+        puts "\n\n#{me} got response from ffmpeg: \n#{err}\n"
+      end
+      puts "#{me} Donezorrs converting #{num_units} filez"
+      ''
     end
 
 
@@ -201,6 +302,14 @@ module Hipe
       end
     end
 
+    def move_to_backup_if_exists path
+      if File.exist? path
+        moved_to = move_to_backup path
+        puts "#{me} moved existing file to #{moved_to}"
+      end
+      nil
+    end
+
 
     #
     # this is just a wrapper around the project folder and
@@ -208,6 +317,8 @@ module Hipe
     # this is the only place that has knowledge of paths.
     #
     class Project
+      include FileyCoyote
+      attr_reader :path
 
       # public
       def initialize controller, path, opts
@@ -249,14 +360,6 @@ module Hipe
 
       def add_record_to_manifest
         manifest.add_record
-      end
-
-      def self.move_to_backup path
-        before_extension, extension = /^(.+)\.([^\.]+)$/.match(path).captures
-        timestamp = Time.now.strftime('%Y-%m-%d--%H-%M-%S')
-        new_name = "#{before_extension}.bak.#{timestamp}.#{extension}"
-        FileUtils.mv path, new_name
-        new_name
       end
 
       def info
